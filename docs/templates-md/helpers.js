@@ -54,7 +54,7 @@ module.exports['process-natspec'] = function (natspec, opts) {
   const currentPage = opts.data.root.__item_context?.page || opts.data.root.id;
   const links = getAllLinks(opts.data.site.items, currentPage);
 
-  return processReferences(natspec, links);
+  return processReferences(natspec, links, opts.data.site.items);
 };
 
 module.exports['typed-params'] = params => {
@@ -166,7 +166,7 @@ function generateLinkPath(pagePath, currentPagePath, anchor) {
 }
 
 // Process {REF} and other references
-function processReferences(content, links) {
+function processReferences(content, links, items) {
   let result = content;
 
   // Handle {REF:Contract.method} patterns
@@ -177,7 +177,7 @@ function processReferences(content, links) {
 
   // Handle double bracket {{name}} patterns - these often reference base contracts
   result = result.replace(/\{\{([^}]+)\}\}/g, (match, name) => {
-    const resolvedRef = resolveDoubleReference(name, links);
+    const resolvedRef = resolveDoubleReference(name, links, items);
     return resolvedRef || match;
   });
 
@@ -196,7 +196,7 @@ function processReferences(content, links) {
 
     // Handle complex function signatures with arrays and multiple parameters
     if (key.includes('-') && (key.includes('[]') || key.includes('address') || key.includes('uint'))) {
-      return resolveContractFunctionReference(key, links) || match;
+      return resolveContractFunctionReference(key, links, items) || match;
     }
 
     // Handle underscore-prefixed functions like _signableUserOpHash
@@ -212,7 +212,7 @@ function processReferences(content, links) {
 
     // First try as a base contract reference
     if (isBaseContractReference(key)) {
-      const resolvedRef = resolveDoubleReference(key, links);
+      const resolvedRef = resolveDoubleReference(key, links, items);
       if (resolvedRef) return resolvedRef;
     }
 
@@ -250,7 +250,7 @@ function resolveReference(refId, links) {
   return null;
 }
 
-function resolveDoubleReference(name, links) {
+function resolveDoubleReference(name, links, items) {
   // First try to find it in current repo links
   const localKey = slug(name);
   if (links[localKey]) {
@@ -265,14 +265,14 @@ function resolveDoubleReference(name, links) {
 
   // Handle contract-function pattern: Contract-functionName or Contract-constructor
   if (name.includes('-')) {
-    return resolveContractFunctionReference(name, links);
+    return resolveContractFunctionReference(name, links, items);
   }
 
   // If not found locally, assume it's from base openzeppelin-contracts repo
   // Create external link to the base contracts documentation
   if (isBaseContractReference(name)) {
     const baseUrl = 'https://docs.openzeppelin.com/contracts/api';
-    const category = getContractCategory(name);
+    const category = getSmartContractCategory(name, items);
     if (category) {
       return `[\`${name}\`](${baseUrl}/${category}#${name})`;
     }
@@ -281,7 +281,7 @@ function resolveDoubleReference(name, links) {
   return null;
 }
 
-function resolveContractFunctionReference(fullRef, links) {
+function resolveContractFunctionReference(fullRef, links, items) {
   const parts = fullRef.split('-');
   const contractName = parts[0];
 
@@ -313,7 +313,7 @@ function resolveContractFunctionReference(fullRef, links) {
   // Check if it's a base contract function reference
   if (isBaseContractReference(contractName)) {
     const baseUrl = 'https://docs.openzeppelin.com/contracts/api';
-    const category = getContractCategory(contractName);
+    const category = getSmartContractCategory(contractName, items);
     if (category) {
       // Create anchor for function reference
       let anchor;
@@ -351,115 +351,10 @@ function isBaseContractReference(name) {
   return !contractName.endsWith('Upgradeable') && baseContractPatterns.some(pattern => pattern.test(contractName));
 }
 
-function getContractCategory(name) {
-  // Handle contract-function references by extracting just the contract name
-  const contractName = name.includes('-') ? name.split('-')[0] : name;
-
-  // Map contract names to their documentation categories
-  const categoryMap = {
-    // Access control
-    IAccessControl: 'access',
-    IAccessControlEnumerable: 'access',
-    IAccessControlDefaultAdminRules: 'access',
-    IAuthority: 'access',
-    IAccessManager: 'access',
-    IAccessManaged: 'access',
-    AuthorityUtils: 'access',
-    AccessControl: 'access',
-    AccessControlEnumerable: 'access',
-    AccessControlDefaultAdminRules: 'access',
-    AccessManager: 'access',
-    AccessManaged: 'access',
-    Ownable: 'access',
-    Ownable2Step: 'access',
-
-    // Token standards - ERC20
-    IERC20: 'token/ERC20',
-    IERC20Metadata: 'token/ERC20',
-    IERC20Permit: 'token/ERC20',
-    ERC20: 'token/ERC20',
-    ERC20Permit: 'token/ERC20',
-    ERC20Burnable: 'token/ERC20',
-    ERC20Capped: 'token/ERC20',
-    ERC20Pausable: 'token/ERC20',
-    ERC20FlashMint: 'token/ERC20',
-    ERC20Votes: 'token/ERC20',
-
-    // Token standards - ERC721
-    IERC721: 'token/ERC721',
-    IERC721Metadata: 'token/ERC721',
-    IERC721Enumerable: 'token/ERC721',
-    ERC721: 'token/ERC721',
-    ERC721Enumerable: 'token/ERC721',
-    ERC721Pausable: 'token/ERC721',
-    ERC721Burnable: 'token/ERC721',
-    ERC721URIStorage: 'token/ERC721',
-
-    // Token standards - ERC1155
-    IERC1155: 'token/ERC1155',
-    IERC1155MetadataURI: 'token/ERC1155',
-    ERC1155: 'token/ERC1155',
-    ERC1155Pausable: 'token/ERC1155',
-    ERC1155Burnable: 'token/ERC1155',
-    ERC1155Supply: 'token/ERC1155',
-
-    // Token standards - ERC6909
-    IERC6909: 'token/ERC6909',
-    ERC6909: 'token/ERC6909',
-
-    // Proxy contracts
-    ERC1967Proxy: 'proxy',
-    ERC1967Utils: 'proxy',
-
-    // Meta transactions
-    EIP712: 'utils',
-    Context: 'utils',
-    ERC2771Context: 'metatx',
-
-    // Governance
-    Governor: 'governance',
-    IGovernor: 'governance',
-    GovernorSettings: 'governance',
-    GovernorCountingSimple: 'governance',
-    GovernorVotes: 'governance',
-    GovernorVotesQuorumFraction: 'governance',
-    GovernorTimelockControl: 'governance',
-
-    // Cryptography
-    ECDSA: 'utils/cryptography',
-    MultiSignerERC7913: 'utils/cryptography',
-    AbstractSigner: 'utils/cryptography',
-    SignatureChecker: 'utils/cryptography',
-
-    // Common utilities
-    IERC165: 'utils',
-    IERC1271: 'utils',
-    ERC165: 'utils',
-    ERC165Checker: 'utils',
-    Create2: 'utils',
-    Base64: 'utils',
-    CAIP2: 'utils',
-    CAIP10: 'utils',
-  };
-
-  if (categoryMap[contractName]) {
-    return categoryMap[contractName];
-  }
-
-  // Fallback: try to guess category based on name patterns
-  if (contractName.startsWith('IERC20') || contractName.includes('ERC20')) return 'token/ERC20';
-  if (contractName.startsWith('IERC721') || contractName.includes('ERC721')) return 'token/ERC721';
-  if (contractName.startsWith('IERC1155') || contractName.includes('ERC1155')) return 'token/ERC1155';
-  if (contractName.startsWith('IERC6909') || contractName.includes('ERC6909')) return 'token/ERC6909';
-  if (contractName.includes('Access') || contractName.includes('Authority') || contractName.includes('Ownable'))
-    return 'access';
-  if (contractName.includes('Governance') || contractName.includes('Governor')) return 'governance';
-  if (contractName.includes('Proxy')) return 'proxy';
-  if (contractName.includes('Finance') || contractName.includes('Vesting') || contractName.includes('Payment'))
-    return 'finance';
-
-  return 'utils'; // Default fallback
-}
+// Legacy function kept for backward compatibility - now uses the new automatic system
+// function getContractCategory(name, items) {
+//   return getSmartContractCategory(name, items);
+// }
 
 function findBestMatch(key, links) {
   let replacement = links[key];
@@ -592,5 +487,225 @@ module.exports['with-prelude'] = opts => {
   const links = getAllLinks(opts.data.site.items, currentPage);
   const contents = opts.fn();
 
-  return processReferences(contents, links);
+  return processReferences(contents, links, opts.data.site.items);
 };
+
+// ========================================
+// AUTOMATIC CONTRACT CATEGORIZATION SYSTEM
+// ========================================
+
+// Cache for contract categorization to avoid repeated lookups
+const contractCategoryCache = new Map();
+
+/**
+ * Automatically determine contract category using path-based detection with intelligent fallbacks
+ * This is the main entry point for the robust categorization system
+ */
+function getSmartContractCategory(contractName, items) {
+  // Handle contract-function references by extracting just the contract name
+  const cleanContractName = contractName.includes('-') ? contractName.split('-')[0] : contractName;
+
+  // Check cache first
+  const cacheKey = `${cleanContractName}:${items?.length || 0}`;
+  if (contractCategoryCache.has(cacheKey)) {
+    return contractCategoryCache.get(cacheKey);
+  }
+
+  let category = null;
+
+  // Approach 1: Path-based categorization (most accurate)
+  category = getAutomaticContractCategory(cleanContractName, items);
+
+  // Approach 2: Fallback to intelligent name pattern matching
+  if (!category) {
+    category = inferCategoryFromName(cleanContractName);
+  }
+
+  // Approach 3: Final fallback
+  if (!category) {
+    category = 'utils';
+  }
+
+  // Cache the result
+  contractCategoryCache.set(cacheKey, category);
+  return category;
+}
+
+/**
+ * Extract category information directly from contract file paths
+ * This uses the actual file organization as the source of truth
+ */
+function getAutomaticContractCategory(contractName, items) {
+  if (!items || !Array.isArray(items)) {
+    return null;
+  }
+
+  // Find the contract in the items array
+  // Try multiple matching strategies to find the right contract
+  const contract = items.find(item => {
+    if (!item.__item_context?.contract) return false;
+
+    const itemContractName = item.__item_context.contract.name;
+    const itemName = item.name;
+
+    // Direct name matches
+    if (itemContractName === contractName || itemName === contractName) {
+      return true;
+    }
+
+    // For base contracts, try matching without 'Upgradeable' suffix
+    if (contractName.endsWith('Upgradeable')) {
+      const baseName = contractName.replace(/Upgradeable$/, '');
+      if (itemContractName === baseName || itemName === baseName) {
+        return true;
+      }
+    }
+
+    // For interfaces, try with and without 'I' prefix
+    if (contractName.startsWith('I') && contractName.length > 1) {
+      const withoutI = contractName.slice(1);
+      if (itemContractName === withoutI || itemName === withoutI) {
+        return true;
+      }
+    }
+
+    return false;
+  });
+
+  if (contract && contract.__item_context?.contract?.source?.absolutePath) {
+    const contractPath = contract.__item_context.contract.source.absolutePath;
+    return extractCategoryFromPath(contractPath);
+  }
+
+  // Try alternative path using page context
+  if (contract && contract.__item_context?.page) {
+    return getCategoryFromPagePath(contract);
+  }
+
+  return null;
+}
+
+/**
+ * Extract category from the contract's file path
+ * Maps the directory structure directly to documentation categories
+ */
+function extractCategoryFromPath(contractPath) {
+  // Extract relative path from contracts/...
+  // Handle both absolute and relative paths
+  const contractsMatch = contractPath.match(/contracts\/([^/]+(?:\/[^/]+)?)/);
+  if (!contractsMatch) {
+    return null;
+  }
+
+  const pathParts = contractsMatch[1].split('/');
+  const mainCategory = pathParts[0];
+  const subCategory = pathParts[1];
+
+  // Map directory structure to documentation categories
+  switch (mainCategory) {
+    case 'token':
+      if (subCategory) {
+        // token/ERC20 -> token/ERC20, token/ERC721 -> token/ERC721, etc.
+        return `token/${subCategory}`;
+      }
+      return 'token';
+
+    case 'utils':
+      if (subCategory) {
+        // utils/cryptography -> utils/cryptography, etc.
+        return `utils/${subCategory}`;
+      }
+      return 'utils';
+
+    case 'access':
+    case 'governance':
+    case 'proxy':
+    case 'metatx':
+    case 'finance':
+    case 'account':
+      // These map directly to their category names
+      return mainCategory;
+
+    default:
+      // Unknown directory, return as-is or fallback
+      return mainCategory || 'utils';
+  }
+}
+
+/**
+ * Use the generated page paths to determine categories
+ * This is a fallback when file path is not available
+ */
+function getCategoryFromPagePath(item) {
+  const pagePath = item.__item_context?.page;
+  if (pagePath) {
+    // Convert page path like "token/ERC20.mdx" to "token/ERC20"
+    const categoryPath = pagePath.replace(/\.(mdx|adoc)$/, '');
+    return categoryPath;
+  }
+  return null;
+}
+
+/**
+ * Enhanced intelligent name pattern matching
+ * Used as a fallback when path information is not available
+ */
+function inferCategoryFromName(contractName) {
+  // Proxy patterns - check ERC1967 before general ERC patterns
+  if (/(Proxy|Beacon|Clone|UUPS|Initializable|ERC1967)/.test(contractName)) {
+    return 'proxy';
+  }
+
+  // Meta-transaction patterns - check ERC2771 before general ERC patterns
+  if (/(ERC2771|Forwarder)/.test(contractName)) {
+    return 'metatx';
+  }
+
+  // ERC Token Standards (most common case)
+  if (/^I?ERC\d+/.test(contractName)) {
+    if (contractName.includes('20')) return 'token/ERC20';
+    if (contractName.includes('721')) return 'token/ERC721';
+    if (contractName.includes('1155')) return 'token/ERC1155';
+    if (contractName.includes('6909')) return 'token/ERC6909';
+    if (contractName.includes('2981')) return 'token/common';
+    return 'token';
+  }
+
+  // Access Control patterns
+  if (/^I?(Access|Authority|Ownable)/.test(contractName)) {
+    return 'access';
+  }
+
+  // Governance patterns
+  if (/^I?(Governor|Timelock|Votes)/.test(contractName)) {
+    return 'governance';
+  }
+
+  // Cryptography patterns
+  if (/(ECDSA|Signature|Hash|Merkle|P256|RSA|EIP712)/.test(contractName)) {
+    return 'utils/cryptography';
+  }
+
+  // Finance patterns
+  if (/(Vesting|Payment|Finance)/.test(contractName)) {
+    return 'finance';
+  }
+
+  // Account patterns
+  if (/(Account|ERC7579|ERC4337)/.test(contractName)) {
+    return 'account';
+  }
+
+  // Math utilities
+  if (/(Math|SafeCast)/.test(contractName)) {
+    return 'utils';
+  }
+
+  // Data structure patterns
+  if (/(BitMaps|Enumerable|DoubleEnded|Checkpoint|Heap|MerkleTree)/.test(contractName)) {
+    return 'utils';
+  }
+
+  // Default fallback for utilities
+  return 'utils';
+}
