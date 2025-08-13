@@ -8,7 +8,6 @@ module.exports['oz-version'] = () => version;
 
 module.exports['readme-path'] = opts => {
   const pageId = opts.data.root.id;
-  // Remove both .adoc and .md extensions
   const basePath = pageId.replace(/\.(adoc|mdx)$/, '');
   return 'contracts/' + basePath + '/README.adoc';
 };
@@ -22,16 +21,15 @@ module.exports.readme = readmePath => {
   } catch (error) {
     console.warn(`Warning: Could not process README at ${readmePath}:`, error.message);
   }
-  return ''; // Return empty string if README doesn't exist or processing fails
+  return '';
 };
 
 module.exports.names = params => params?.map(p => p.name).join(', ');
 
-// Create a context for tracking function names across the current contract
+// Simple function counter for unique IDs
 const functionNameCounts = {};
 
 module.exports['simple-id'] = function (name) {
-  // Keep track of how many times we've seen this function name
   if (!functionNameCounts[name]) {
     functionNameCounts[name] = 1;
     return name;
@@ -47,76 +45,16 @@ module.exports['reset-function-counts'] = function () {
 };
 
 module.exports.eq = (a, b) => a === b;
-
 module.exports['starts-with'] = (str, prefix) => str && str.startsWith(prefix);
 
-// Helper to process natspec content with link replacement
+// Process natspec content with {REF} and link replacement
 module.exports['process-natspec'] = function (natspec, opts) {
   if (!natspec) return '';
 
-  // Get links from the site data, passing current page context
   const currentPage = opts.data.root.__item_context?.page || opts.data.root.id;
   const links = getAllLinks(opts.data.site.items, currentPage);
 
-  // Apply the same link replacement logic as in with-prelude
-  let content = natspec;
-
-  // First handle AsciiDoc-style {xref-...}[text] patterns
-  content = content.replace(/\{(xref-[-._a-z0-9]+)\}\[([^\]]*)\]/gi, (match, key, linkText) => {
-    const replacement = links[key];
-    if (replacement) {
-      return `[${linkText}](${replacement})`;
-    }
-    return match;
-  });
-
-  // Replace all {link-key} placeholders with actual markdown links
-  content = content.replace(/\{([-._a-z0-9]+)\}/gi, (match, key) => {
-    let replacement = links[key];
-
-    // If not found, try various matching strategies
-    if (!replacement) {
-      // Strategy 1: Look for keys that end with this key (for function references without contract prefix)
-      let matchingKeys = Object.keys(links).filter(linkKey => {
-        const parts = linkKey.split('-');
-        return parts.length >= 2 && parts[parts.length - 1] === key;
-      });
-
-      // Strategy 2: Try with different separators (dot notation to dash)
-      if (matchingKeys.length === 0) {
-        const keyWithDashes = key.replace(/\./g, '-');
-        matchingKeys = Object.keys(links).filter(linkKey => linkKey.includes(keyWithDashes));
-      }
-
-      // Strategy 3: Try exact match with different prefixes
-      if (matchingKeys.length === 0) {
-        matchingKeys = Object.keys(links).filter(linkKey => {
-          return linkKey === key || linkKey.endsWith('-' + key) || linkKey.includes(key);
-        });
-      }
-
-      if (matchingKeys.length > 0) {
-        // Prefer non-xref versions
-        const nonXrefMatches = matchingKeys.filter(k => !k.startsWith('xref-'));
-        const bestMatch = nonXrefMatches.length > 0 ? nonXrefMatches[0] : matchingKeys[0];
-        replacement = links[bestMatch];
-      }
-    }
-
-    return replacement || match; // Keep original if no replacement found
-  });
-
-  // Fix AsciiDoc-style URL links that weren't converted: url[text] -> [text](url)
-  content = content.replace(/https?:\/\/[^\s[]+\[[^\]]+\]/g, match => {
-    const urlMatch = match.match(/^(https?:\/\/[^[]+)\[([^\]]+)\]$/);
-    if (urlMatch) {
-      const [, url, linkText] = urlMatch;
-      return `[${linkText}](${url})`;
-    }
-    return match;
-  });
-
-  return content;
+  return processReferences(natspec, links);
 };
 
 module.exports['typed-params'] = params => {
@@ -130,11 +68,21 @@ const slug = (module.exports.slug = str => {
   return str.replace(/\W/g, '-');
 });
 
-// Markdown-specific link generation
+// Link generation and caching
 const linksCache = new WeakMap();
 
+// Add helper to check if this is an upgradeable repo
+module.exports['is-upgradeable-repo'] = () => {
+  return process.cwd().includes('contracts-upgradeable');
+};
+
+// Add source repo helper
+module.exports['source-repo'] = () => {
+  const isUpgradeable = process.cwd().includes('contracts-upgradeable');
+  return isUpgradeable ? 'openzeppelin-contracts-upgradeable' : 'openzeppelin-contracts';
+};
+
 function getAllLinks(items, currentPage) {
-  // Only use cache for specific pages, not for undefined currentPage
   if (currentPage) {
     const cacheKey = currentPage;
     let cache = linksCache.get(items);
@@ -152,67 +100,25 @@ function getAllLinks(items, currentPage) {
   const currentPagePath = currentPage ? currentPage.replace(/\.mdx$/, '') : '';
 
   for (const item of items) {
-    // Remove .mdx extension from page path
     const pagePath = item.__item_context.page.replace(/\.mdx$/, '');
+    const linkPath = generateLinkPath(pagePath, currentPagePath, item.anchor);
 
-    let linkPath;
-    // Normalize paths for comparison - remove leading directories if they match
-    const currentBaseName = currentPagePath.split('/').pop();
-    const targetBaseName = pagePath.split('/').pop();
-
-    if (currentPagePath && (pagePath === currentPagePath || currentBaseName === targetBaseName)) {
-      // Same page - just use anchor fragment
-      linkPath = `#${item.anchor}`;
-    } else if (currentPagePath) {
-      // Different page - use relative path
-      const currentParts = currentPagePath.split('/');
-      const targetParts = pagePath.split('/');
-
-      // Find common base and create relative path
-      let i = 0;
-      while (i < currentParts.length && i < targetParts.length && currentParts[i] === targetParts[i]) {
-        i++;
-      }
-
-      const upLevels = Math.max(0, currentParts.length - 1 - i);
-      const downPath = targetParts.slice(i);
-
-      if (upLevels === 0 && downPath.length === 1) {
-        // Same directory - just filename
-        linkPath = `${downPath[0]}#${item.anchor}`;
-      } else if (upLevels === 0) {
-        // Going deeper into subdirectories
-        linkPath = `${downPath.join('/')}#${item.anchor}`;
-      } else {
-        // Need to go up directory structure
-        const relativePath = '../'.repeat(upLevels) + downPath.join('/');
-        linkPath = `${relativePath}#${item.anchor}`;
-      }
-    } else {
-      // Fallback to absolute path
-      linkPath = `${pagePath}#${item.anchor}`;
-    }
-
-    // Generate xref keys to match legacy natspec content patterns
-    // xref patterns should just be the link URL without text (text comes from surrounding content)
+    // Generate xref keys for legacy compatibility
     res[`xref-${item.anchor}`] = linkPath;
 
-    // Reconstruct the original AsciiDoc anchor format (with original case) for xref key
-    // but link to our lowercase anchor. This handles natspec like {xref-ERC721-_safeMint-address-uint256-}
+    // Generate original case xref keys
     if (item.__item_context && item.__item_context.contract) {
       let originalAnchor = item.__item_context.contract.name + '-' + item.name;
       if ('parameters' in item) {
         const signature = item.parameters.parameters.map(v => v.typeName.typeDescriptions.typeString).join(',');
         originalAnchor += slug('(' + signature + ')');
       }
-      // Add original case xref key that maps to lowercase anchor (just URL, no text)
       res[`xref-${originalAnchor}`] = linkPath;
     }
 
     res[slug(item.fullName)] = `[\`${item.fullName}\`](${linkPath})`;
   }
 
-  // Only cache if we have a specific currentPage
   if (currentPage) {
     let cache = linksCache.get(items);
     if (!cache) {
@@ -225,96 +131,426 @@ function getAllLinks(items, currentPage) {
   return res;
 }
 
+function generateLinkPath(pagePath, currentPagePath, anchor) {
+  if (
+    currentPagePath &&
+    (pagePath === currentPagePath || pagePath.split('/').pop() === currentPagePath.split('/').pop())
+  ) {
+    return `#${anchor}`;
+  }
+
+  if (currentPagePath) {
+    const currentParts = currentPagePath.split('/');
+    const targetParts = pagePath.split('/');
+
+    // Find common base
+    let i = 0;
+    while (i < currentParts.length && i < targetParts.length && currentParts[i] === targetParts[i]) {
+      i++;
+    }
+
+    const upLevels = Math.max(0, currentParts.length - 1 - i);
+    const downPath = targetParts.slice(i);
+
+    if (upLevels === 0 && downPath.length === 1) {
+      return `${downPath[0]}#${anchor}`;
+    } else if (upLevels === 0) {
+      return `${downPath.join('/')}#${anchor}`;
+    } else {
+      const relativePath = '../'.repeat(upLevels) + downPath.join('/');
+      return `${relativePath}#${anchor}`;
+    }
+  }
+
+  return `${pagePath}#${anchor}`;
+}
+
+// Process {REF} and other references
+function processReferences(content, links) {
+  let result = content;
+
+  // Handle {REF:Contract.method} patterns
+  result = result.replace(/\{REF:([^}]+)\}/g, (match, refId) => {
+    const resolvedRef = resolveReference(refId, links);
+    return resolvedRef || match;
+  });
+
+  // Handle double bracket {{name}} patterns - these often reference base contracts
+  result = result.replace(/\{\{([^}]+)\}\}/g, (match, name) => {
+    const resolvedRef = resolveDoubleReference(name, links);
+    return resolvedRef || match;
+  });
+
+  // Handle AsciiDoc-style {xref-...}[text] patterns
+  result = result.replace(/\{(xref-[-._a-z0-9]+)\}\[([^\]]*)\]/gi, (match, key, linkText) => {
+    const replacement = links[key];
+    return replacement ? `[${linkText}](${replacement})` : match;
+  });
+
+  // Replace single bracket {link-key} placeholders - try base contract resolution first
+  result = result.replace(/\{([^}]+)\}/gi, (match, key) => {
+    // Skip escaped braces like \{id\} which are literal text
+    if (match.startsWith('\\{')) {
+      return match;
+    }
+
+    // Handle complex function signatures with arrays and multiple parameters
+    if (key.includes('-') && (key.includes('[]') || key.includes('address') || key.includes('uint'))) {
+      return resolveContractFunctionReference(key, links) || match;
+    }
+
+    // Handle underscore-prefixed functions like _signableUserOpHash
+    if (key.startsWith('_')) {
+      // Try to find local function first
+      const localMatch = findBestMatch(key, links);
+      if (localMatch) return localMatch;
+
+      // If not found locally, it might be from a base contract (without Upgradeable suffix)
+      // We'll assume it's internal and not generate external links for private functions
+      return match;
+    }
+
+    // First try as a base contract reference
+    if (isBaseContractReference(key)) {
+      const resolvedRef = resolveDoubleReference(key, links);
+      if (resolvedRef) return resolvedRef;
+    }
+
+    // Then try normal local link matching
+    const replacement = findBestMatch(key, links);
+    return replacement || match;
+  });
+
+  return cleanupContent(result);
+}
+
+function resolveReference(refId, links) {
+  // Try direct match first
+  const directKey = `xref-${refId.replace(/\./g, '-')}`;
+  if (links[directKey]) {
+    const parts = refId.split('.');
+    const displayText = parts.length > 1 ? `${parts[0]}.${parts[1]}` : refId;
+    return `[\`${displayText}\`](${links[directKey]})`;
+  }
+
+  // Try fuzzy matching
+  const matchingKeys = Object.keys(links).filter(key => {
+    const normalizedKey = key.replace('xref-', '').toLowerCase();
+    const normalizedRef = refId.replace(/\./g, '-').toLowerCase();
+    return normalizedKey.includes(normalizedRef) || normalizedRef.includes(normalizedKey);
+  });
+
+  if (matchingKeys.length > 0) {
+    const bestMatch = matchingKeys[0];
+    const parts = refId.split('.');
+    const displayText = parts.length > 1 ? `${parts[0]}.${parts[1]}` : refId;
+    return `[\`${displayText}\`](${links[bestMatch]})`;
+  }
+
+  return null;
+}
+
+function resolveDoubleReference(name, links) {
+  // First try to find it in current repo links
+  const localKey = slug(name);
+  if (links[localKey]) {
+    return links[localKey];
+  }
+
+  // Try xref pattern
+  const xrefKey = `xref-${name.replace(/\./g, '-')}`;
+  if (links[xrefKey]) {
+    return `[\`${name}\`](${links[xrefKey]})`;
+  }
+
+  // Handle contract-function pattern: Contract-functionName or Contract-constructor
+  if (name.includes('-')) {
+    return resolveContractFunctionReference(name, links);
+  }
+
+  // If not found locally, assume it's from base openzeppelin-contracts repo
+  // Create external link to the base contracts documentation
+  if (isBaseContractReference(name)) {
+    const baseUrl = 'https://docs.openzeppelin.com/contracts/api';
+    const category = getContractCategory(name);
+    if (category) {
+      return `[\`${name}\`](${baseUrl}/${category}#${name})`;
+    }
+  }
+
+  return null;
+}
+
+function resolveContractFunctionReference(fullRef, links) {
+  const parts = fullRef.split('-');
+  const contractName = parts[0];
+
+  // Handle complex function signatures with parameters
+  let functionName,
+    signature = '';
+  if (parts.length > 2) {
+    // For complex signatures like SignatureChecker-areValidSignaturesNow-bytes32-bytes[]-bytes[]
+    functionName = parts[1];
+    // The rest are parameter types - we'll create a simplified signature
+    const paramTypes = parts.slice(2);
+    if (paramTypes.length > 0) {
+      signature = `(${paramTypes.join(', ')})`;
+    }
+  } else {
+    functionName = parts.slice(1).join('-'); // Handle cases like Contract-_private_function
+  }
+
+  // First check if this is a local upgradeable contract function
+  const upgradeableContractName = contractName + 'Upgradeable';
+  const localFunctionKey = `${upgradeableContractName}-${functionName}`;
+  const localXrefKey = `xref-${localFunctionKey}`;
+
+  if (links[localXrefKey]) {
+    const displayText = signature ? `${contractName}.${functionName}${signature}` : `${contractName}.${functionName}`;
+    return `[\`${displayText}\`](${links[localXrefKey]})`;
+  }
+
+  // Check if it's a base contract function reference
+  if (isBaseContractReference(contractName)) {
+    const baseUrl = 'https://docs.openzeppelin.com/contracts/api';
+    const category = getContractCategory(contractName);
+    if (category) {
+      // Create anchor for function reference
+      let anchor;
+      if (functionName === 'constructor') {
+        anchor = contractName; // Constructor uses just the contract name as anchor
+      } else {
+        // For complex signatures, try to create a reasonable anchor
+        const cleanFunctionName = functionName.replace(/^_/, '');
+        anchor = `${contractName}-${cleanFunctionName}`;
+      }
+      const displayText = signature
+        ? `${contractName}.${functionName}${signature}`
+        : functionName === 'constructor'
+          ? `${contractName} constructor`
+          : `${contractName}.${functionName}`;
+      return `[\`${displayText}\`](${baseUrl}/${category}#${anchor})`;
+    }
+  }
+
+  return null;
+}
+
+function isBaseContractReference(name) {
+  // Handle contract-function references by extracting just the contract name
+  const contractName = name.includes('-') ? name.split('-')[0] : name;
+
+  // Common patterns for base contract interfaces/contracts
+  const baseContractPatterns = [
+    /^I[A-Z]/, // Interfaces like IAccessControl
+    /^ERC\d+/, // Standards like ERC20, ERC721, ERC1967Proxy (without Upgradeable suffix)
+    /^[A-Z][a-zA-Z0-9]+$/, // Other base contracts without Upgradeable suffix (including Base64, Create2, CAIP2, etc.)
+  ];
+
+  // If it doesn't end with 'Upgradeable', it's likely a base contract
+  return !contractName.endsWith('Upgradeable') && baseContractPatterns.some(pattern => pattern.test(contractName));
+}
+
+function getContractCategory(name) {
+  // Handle contract-function references by extracting just the contract name
+  const contractName = name.includes('-') ? name.split('-')[0] : name;
+
+  // Map contract names to their documentation categories
+  const categoryMap = {
+    // Access control
+    IAccessControl: 'access',
+    IAccessControlEnumerable: 'access',
+    IAccessControlDefaultAdminRules: 'access',
+    IAuthority: 'access',
+    IAccessManager: 'access',
+    IAccessManaged: 'access',
+    AuthorityUtils: 'access',
+    AccessControl: 'access',
+    AccessControlEnumerable: 'access',
+    AccessControlDefaultAdminRules: 'access',
+    AccessManager: 'access',
+    AccessManaged: 'access',
+    Ownable: 'access',
+    Ownable2Step: 'access',
+
+    // Token standards - ERC20
+    IERC20: 'token/ERC20',
+    IERC20Metadata: 'token/ERC20',
+    IERC20Permit: 'token/ERC20',
+    ERC20: 'token/ERC20',
+    ERC20Permit: 'token/ERC20',
+    ERC20Burnable: 'token/ERC20',
+    ERC20Capped: 'token/ERC20',
+    ERC20Pausable: 'token/ERC20',
+    ERC20FlashMint: 'token/ERC20',
+    ERC20Votes: 'token/ERC20',
+
+    // Token standards - ERC721
+    IERC721: 'token/ERC721',
+    IERC721Metadata: 'token/ERC721',
+    IERC721Enumerable: 'token/ERC721',
+    ERC721: 'token/ERC721',
+    ERC721Enumerable: 'token/ERC721',
+    ERC721Pausable: 'token/ERC721',
+    ERC721Burnable: 'token/ERC721',
+    ERC721URIStorage: 'token/ERC721',
+
+    // Token standards - ERC1155
+    IERC1155: 'token/ERC1155',
+    IERC1155MetadataURI: 'token/ERC1155',
+    ERC1155: 'token/ERC1155',
+    ERC1155Pausable: 'token/ERC1155',
+    ERC1155Burnable: 'token/ERC1155',
+    ERC1155Supply: 'token/ERC1155',
+
+    // Token standards - ERC6909
+    IERC6909: 'token/ERC6909',
+    ERC6909: 'token/ERC6909',
+
+    // Proxy contracts
+    ERC1967Proxy: 'proxy',
+    ERC1967Utils: 'proxy',
+
+    // Meta transactions
+    EIP712: 'utils',
+    Context: 'utils',
+    ERC2771Context: 'metatx',
+
+    // Governance
+    Governor: 'governance',
+    IGovernor: 'governance',
+    GovernorSettings: 'governance',
+    GovernorCountingSimple: 'governance',
+    GovernorVotes: 'governance',
+    GovernorVotesQuorumFraction: 'governance',
+    GovernorTimelockControl: 'governance',
+
+    // Cryptography
+    ECDSA: 'utils/cryptography',
+    MultiSignerERC7913: 'utils/cryptography',
+    AbstractSigner: 'utils/cryptography',
+    SignatureChecker: 'utils/cryptography',
+
+    // Common utilities
+    IERC165: 'utils',
+    IERC1271: 'utils',
+    ERC165: 'utils',
+    ERC165Checker: 'utils',
+    Create2: 'utils',
+    Base64: 'utils',
+    CAIP2: 'utils',
+    CAIP10: 'utils',
+  };
+
+  if (categoryMap[contractName]) {
+    return categoryMap[contractName];
+  }
+
+  // Fallback: try to guess category based on name patterns
+  if (contractName.startsWith('IERC20') || contractName.includes('ERC20')) return 'token/ERC20';
+  if (contractName.startsWith('IERC721') || contractName.includes('ERC721')) return 'token/ERC721';
+  if (contractName.startsWith('IERC1155') || contractName.includes('ERC1155')) return 'token/ERC1155';
+  if (contractName.startsWith('IERC6909') || contractName.includes('ERC6909')) return 'token/ERC6909';
+  if (contractName.includes('Access') || contractName.includes('Authority') || contractName.includes('Ownable'))
+    return 'access';
+  if (contractName.includes('Governance') || contractName.includes('Governor')) return 'governance';
+  if (contractName.includes('Proxy')) return 'proxy';
+  if (contractName.includes('Finance') || contractName.includes('Vesting') || contractName.includes('Payment'))
+    return 'finance';
+
+  return 'utils'; // Default fallback
+}
+
+function findBestMatch(key, links) {
+  let replacement = links[key];
+
+  if (!replacement) {
+    // Strategy 1: Look for keys that end with this key
+    let matchingKeys = Object.keys(links).filter(linkKey => {
+      const parts = linkKey.split('-');
+      return parts.length >= 2 && parts[parts.length - 1] === key;
+    });
+
+    // Strategy 2: Try with different separators
+    if (matchingKeys.length === 0) {
+      const keyWithDashes = key.replace(/\./g, '-');
+      matchingKeys = Object.keys(links).filter(linkKey => linkKey.includes(keyWithDashes));
+    }
+
+    // Strategy 3: Try partial matches
+    if (matchingKeys.length === 0) {
+      matchingKeys = Object.keys(links).filter(linkKey => {
+        return linkKey === key || linkKey.endsWith('-' + key) || linkKey.includes(key);
+      });
+    }
+
+    if (matchingKeys.length > 0) {
+      const nonXrefMatches = matchingKeys.filter(k => !k.startsWith('xref-'));
+      const bestMatch = nonXrefMatches.length > 0 ? nonXrefMatches[0] : matchingKeys[0];
+      replacement = links[bestMatch];
+    }
+  }
+
+  return replacement;
+}
+
+function cleanupContent(content) {
+  return content
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
+    .replace(/&#x2F;/g, '/')
+    .replace(/&#x60;/g, '`')
+    .replace(/&#x3D;/g, '=')
+    .replace(/&amp;/g, '&')
+    .replace(/\{(\[`[^`]+`\]\([^)]+\))\}/g, '$1')
+    .replace(/https?:\/\/[^\s[]+\[[^\]]+\]/g, match => {
+      const urlMatch = match.match(/^(https?:\/\/[^[]+)\[([^\]]+)\]$/);
+      return urlMatch ? `[${urlMatch[2]}](${urlMatch[1]})` : match;
+    });
+}
+
 function processAdocContent(content) {
   try {
-    // Create a temporary directory for processing
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adoc-process-'));
     const tempAdocFile = path.join(tempDir, 'temp.adoc');
     const tempMdFile = path.join(tempDir, 'temp.md');
 
-    // Apply transformations to content
-    let processedContent = content;
+    // Preprocess AsciiDoc content
+    let processedContent = content
+      .replace(
+        /```solidity\s*\ninclude::api:example\$([^[\]]+)\[\]\s*\n```/g,
+        "<include cwd lang='solidity'>./examples/$1</include>",
+      )
+      .replace(
+        /\[source,solidity\]\s*\n----\s*\ninclude::api:example\$([^[\]]+)\[\]\s*\n----/g,
+        "<include cwd lang='solidity'>./examples/$1</include>",
+      )
+      .replace(/^(TIP|NOTE):\s*(.+)$/gm, '<Callout>\n$2\n</Callout>')
+      .replace(/^(IMPORTANT|WARNING):\s*(.+)$/gm, "<Callout type='warn'>\n$2\n</Callout>");
 
-    // Replace code blocks with includes
-    processedContent = processedContent.replace(
-      /```solidity\s*\ninclude::api:example\$([^[\]]+)\[\]\s*\n```/g,
-      "<include cwd lang='solidity'>./examples/$1</include>",
-    );
-
-    processedContent = processedContent.replace(
-      /\[source,solidity\]\s*\n----\s*\ninclude::api:example\$([^[\]]+)\[\]\s*\n----/g,
-      "<include cwd lang='solidity'>./examples/$1</include>",
-    );
-
-    // Replace TIP: and NOTE: callouts with <Callout> tags
-    processedContent = processedContent.replace(/^(TIP|NOTE):\s*(.+)$/gm, '<Callout>\n$2\n</Callout>');
-
-    processedContent = processedContent.replace(
-      /^(IMPORTANT|WARNING):\s*(.+)$/gm,
-      "<Callout type='warn'>\n$2\n</Callout>",
-    );
-
-    // Write preprocessed content to temp file
     fs.writeFileSync(tempAdocFile, processedContent, 'utf8');
 
-    // Run downdoc (using bunx as in your script)
     execSync(`bunx downdoc "${tempAdocFile}"`, {
       stdio: 'pipe',
       cwd: process.cwd(),
     });
 
-    // Read the generated markdown
     let mdContent = fs.readFileSync(tempMdFile, 'utf8');
 
-    // Fix HTML entities globally - decode &amp; first to avoid double-decoding issues
-    mdContent = mdContent
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&#x27;/g, "'")
-      .replace(/&#x2F;/g, '/')
-      .replace(/&#x60;/g, '`') // Decode backticks
-      .replace(/&#x3D;/g, '=') // Decode equals signs
-      .replace(/&amp;/g, '&'); // Decode &amp; last to avoid double-decoding
-
-    // Convert api: links to contracts/v5.x/api/ and change .adoc to .mdx
-    mdContent = mdContent.replace(/\(api:([^)]+)\.adoc([^)]*)\)/g, '(contracts/v5.x/api/$1.mdx$2)');
-
-    // Add forward slash to image paths
-    mdContent = mdContent.replace(/!\[([^\]]*)\]\(([^/)][^)]*\.(png|jpg|jpeg|gif|svg|webp))\)/g, '![$1](/$2)');
-
-    // Fix curly brace placeholders that got incorrectly converted
-    mdContent = mdContent.replace(/\{(\[`[^`]+`\]\([^)]+\))\}/g, '$1');
-
-    // Fix AsciiDoc-style URL links that weren't converted: url[text] -> [text](url)
-    mdContent = mdContent.replace(/https?:\/\/[^\s[]+\[[^\]]+\]/g, match => {
-      const urlMatch = match.match(/^(https?:\/\/[^[]+)\[([^\]]+)\]$/);
-      if (urlMatch) {
-        const [, url, linkText] = urlMatch;
-        return `[${linkText}](${url})`;
-      }
-      return match;
-    });
-
-    // Convert HTML definition list callouts to proper Callout components
-    mdContent = mdContent.replace(
-      /<dl><dt><strong>💡 TIP<\/strong><\/dt><dd>\s*([\s\S]*?)\s*<\/dd><\/dl>/g,
-      '<Callout>\n$1\n</Callout>',
-    );
-
-    mdContent = mdContent.replace(
-      /<dl><dt><strong>📌 NOTE<\/strong><\/dt><dd>\s*([\s\S]*?)\s*<\/dd><\/dl>/g,
-      '<Callout>\n$1\n</Callout>',
-    );
-
-    // Handle other callout patterns that might have different icons or text
-    mdContent = mdContent.replace(
-      /<dl><dt><strong>(?:💡|📌|ℹ️)?\s*(TIP|NOTE|INFO)<\/strong><\/dt><dd>\s*([\s\S]*?)\s*<\/dd><\/dl>/g,
-      '<Callout>\n$2\n</Callout>',
-    );
-
-    // Remove the first H1 from content (since the template will add its own title)
-    const contentWithoutFirstH1 = mdContent.replace(/^#+\s+.+$/m, '').replace(/^\n+/, '');
+    // Clean up and transform markdown
+    mdContent = cleanupContent(mdContent)
+      .replace(/\(api:([^)]+)\.adoc([^)]*)\)/g, '(contracts/v5.x/api/$1.mdx$2)')
+      .replace(/!\[([^\]]*)\]\(([^/)][^)]*\.(png|jpg|jpeg|gif|svg|webp))\)/g, '![$1](/$2)')
+      .replace(/<dl><dt><strong>💡 TIP<\/strong><\/dt><dd>\s*([\s\S]*?)\s*<\/dd><\/dl>/g, '<Callout>\n$1\n</Callout>')
+      .replace(/<dl><dt><strong>📌 NOTE<\/strong><\/dt><dd>\s*([\s\S]*?)\s*<\/dd><\/dl>/g, '<Callout>\n$1\n</Callout>')
+      .replace(
+        /<dl><dt><strong>(?:💡|📌|ℹ️)?\s*(TIP|NOTE|INFO)<\/strong><\/dt><dd>\s*([\s\S]*?)\s*<\/dd><\/dl>/g,
+        '<Callout>\n$2\n</Callout>',
+      )
+      .replace(/^#+\s+.+$/m, '')
+      .replace(/^\n+/, '');
 
     // Cleanup temp files
     try {
@@ -322,25 +558,21 @@ function processAdocContent(content) {
       fs.unlinkSync(tempMdFile);
       fs.rmdirSync(tempDir);
     } catch (cleanupError) {
-      // Ignore cleanup errors
       console.warn('Warning: Could not clean up temp files:', cleanupError.message);
     }
 
-    return contentWithoutFirstH1;
+    return mdContent;
   } catch (error) {
     console.warn('Warning: Failed to process AsciiDoc content:', error.message);
-    // Fallback: return original content
     return content;
   }
 }
 
 module.exports.title = opts => {
   const pageId = opts.data.root.id;
-  // Extract directory name from page path and format as title
   const basePath = pageId.replace(/\.(adoc|mdx)$/, '');
   const parts = basePath.split('/');
   const dirName = parts[parts.length - 1] || 'Contracts';
-  // Convert from kebab-case to Title Case
   return dirName
     .split('-')
     .map(word => word.charAt(0).toUpperCase() + word.slice(1))
@@ -356,96 +588,9 @@ module.exports.description = opts => {
 };
 
 module.exports['with-prelude'] = opts => {
-  // For markdown, we'll replace the placeholders inline
   const currentPage = opts.data.root.id;
   const links = getAllLinks(opts.data.site.items, currentPage);
-  let contents = opts.fn();
+  const contents = opts.fn();
 
-  // First handle AsciiDoc-style {xref-...}[text] patterns
-  contents = contents.replace(/\{(xref-[-._a-z0-9]+)\}\[([^\]]*)\]/gi, (match, key, linkText) => {
-    const replacement = links[key];
-    if (replacement) {
-      return `[${linkText}](${replacement})`;
-    }
-    return match;
-  });
-
-  // Replace all {link-key} placeholders with actual markdown links
-  contents = contents.replace(/\{([-._a-z0-9]+)\}/gi, (match, key) => {
-    let replacement = links[key];
-
-    // If not found, try various matching strategies
-    if (!replacement) {
-      // Strategy 1: Look for keys that end with this key (for function references without contract prefix)
-      let matchingKeys = Object.keys(links).filter(linkKey => {
-        const parts = linkKey.split('-');
-        return parts.length >= 2 && parts[parts.length - 1] === key;
-      });
-
-      // Strategy 2: Try with different separators (dot notation to dash)
-      if (matchingKeys.length === 0) {
-        const keyWithDashes = key.replace(/\./g, '-');
-        matchingKeys = Object.keys(links).filter(linkKey => linkKey.includes(keyWithDashes));
-      }
-
-      // Strategy 3: Try exact match with different prefixes
-      if (matchingKeys.length === 0) {
-        matchingKeys = Object.keys(links).filter(linkKey => {
-          return linkKey === key || linkKey.endsWith('-' + key) || linkKey.includes(key);
-        });
-      }
-
-      if (matchingKeys.length > 0) {
-        // Prefer non-xref versions
-        const nonXrefMatches = matchingKeys.filter(k => !k.startsWith('xref-'));
-        const bestMatch = nonXrefMatches.length > 0 ? nonXrefMatches[0] : matchingKeys[0];
-        replacement = links[bestMatch];
-      }
-    }
-
-    return replacement || match; // Keep original if no replacement found
-  });
-
-  // Fix HTML entities that may have been introduced
-  contents = contents
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#x27;/g, "'")
-    .replace(/&#x2F;/g, '/')
-    .replace(/&#x60;/g, '`') // Decode backticks
-    .replace(/&#x3D;/g, '=') // Decode equals signs
-    .replace(/&amp;/g, '&'); // Decode &amp; last to avoid double-decoding
-
-  // Fix curly brace placeholders that may have been incorrectly added by link replacement
-  contents = contents.replace(/\{(\[`[^`]+`\]\([^)]+\))\}/g, '$1');
-
-  // Fix AsciiDoc-style URL links that weren't converted: url[text] -> [text](url)
-  contents = contents.replace(/https?:\/\/[^\s[]+\[[^\]]+\]/g, match => {
-    const urlMatch = match.match(/^(https?:\/\/[^[]+)\[([^\]]+)\]$/);
-    if (urlMatch) {
-      const [, url, linkText] = urlMatch;
-      return `[${linkText}](${url})`;
-    }
-    return match;
-  });
-
-  // Convert HTML definition list callouts to proper Callout components
-  contents = contents.replace(
-    /<dl><dt><strong>💡 TIP<\/strong><\/dt><dd>\s*([\s\S]*?)\s*<\/dd><\/dl>/g,
-    '<Callout>\n$1\n</Callout>',
-  );
-
-  contents = contents.replace(
-    /<dl><dt><strong>📌 NOTE<\/strong><\/dt><dd>\s*([\s\S]*?)\s*<\/dd><\/dl>/g,
-    '<Callout>\n$1\n</Callout>',
-  );
-
-  // Handle other callout patterns that might have different icons or text
-  contents = contents.replace(
-    /<dl><dt><strong>(?:💡|📌|ℹ️)?\s*(TIP|NOTE|INFO)<\/strong><\/dt><dd>\s*([\s\S]*?)\s*<\/dd><\/dl>/g,
-    '<Callout>\n$2\n</Callout>',
-  );
-
-  return contents;
+  return processReferences(contents, links);
 };
