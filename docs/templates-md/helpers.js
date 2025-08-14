@@ -422,8 +422,8 @@ function processAdocContent(content) {
         /\[source,solidity\]\s*\n----\s*\ninclude::api:example\$([^[\]]+)\[\]\s*\n----/g,
         "<include cwd lang='solidity'>./examples/$1</include>",
       )
-      .replace(/^(TIP|NOTE):\s*(.+)$/gm, '<Callout>\n$2\n</Callout>')
-      .replace(/^(IMPORTANT|WARNING):\s*(.+)$/gm, "<Callout type='warn'>\n$2\n</Callout>");
+      .replace(/^(TIP|NOTE):\s*([\s\S]*?)(?=\n\n)/gm, '<Callout>\n$2\n</Callout>')
+      .replace(/^(IMPORTANT|WARNING):\s*([\s\S]*?)(?=\n\n)/gm, "<Callout type='warn'>\n$2\n</Callout>");
 
     fs.writeFileSync(tempAdocFile, processedContent, 'utf8');
 
@@ -444,6 +444,8 @@ function processAdocContent(content) {
         /<dl><dt><strong>(?:💡|📌|ℹ️)?\s*(TIP|NOTE|INFO)<\/strong><\/dt><dd>\s*([\s\S]*?)\s*<\/dd><\/dl>/g,
         '<Callout>\n$2\n</Callout>',
       )
+      .replace(/^(TIP|NOTE):\s*([\s\S]*?)(?=\n\n)/gm, '<Callout>\n$2\n</Callout>')
+      .replace(/^(IMPORTANT|WARNING):\s*([\s\S]*?)(?=\n\n)/gm, "<Callout type='warn'>\n$2\n</Callout>")
       .replace(/^#+\s+.+$/m, '')
       .replace(/^\n+/, '');
 
