@@ -182,8 +182,21 @@ function processReferences(content, links, items) {
   });
 
   // Handle AsciiDoc-style {xref-...}[text] patterns
-  result = result.replace(/\{(xref-[-._a-z0-9]+)\}\[([^\]]*)\]/gi, (match, key, linkText) => {
-    const replacement = links[key];
+  result = result.replace(/\{(xref-[-._a-zA-Z0-9]+)\}\[([^\]]*)\]/g, (match, key, linkText) => {
+    let replacement = links[key];
+
+    // If direct match fails, try to resolve by converting xref format to local anchor
+    if (!replacement && key.startsWith('xref-')) {
+      const anchorKey = key.substring(5); // Remove 'xref-' prefix
+
+      // Convert contract name patterns to Upgradeable versions generically
+      // Pattern: ERC<number>-method -> ERC<number>Upgradeable-method
+      const upgradeableAnchor = anchorKey.replace(/^(ERC\d+)-/, '$1Upgradeable-');
+
+      // Generate local anchor link
+      replacement = `#${upgradeableAnchor}`;
+    }
+
     return replacement ? `[${linkText}](${replacement})` : match;
   });
 
